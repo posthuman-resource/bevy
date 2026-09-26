@@ -77,7 +77,8 @@ pub use render::*;
 pub use ssao::*;
 pub use ssr::*;
 pub use transmission::*;
-pub use volumetric_fog::VolumetricFogPlugin;
+// Fork: `VolumetricFogResolution` (posthuman-resource/bevy, `phase-shift/half-res-fog`).
+pub use volumetric_fog::{VolumetricFogPlugin, VolumetricFogResolution};
 
 /// The PBR prelude.
 ///
