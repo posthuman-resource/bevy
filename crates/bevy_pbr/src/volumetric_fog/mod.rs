@@ -35,7 +35,7 @@ use bevy_core_pipeline::{
     core_3d::prepare_core_3d_depth_textures,
     schedule::{Core3d, Core3dSystems},
 };
-use bevy_ecs::{resource::Resource, schedule::IntoScheduleConfigs as _};
+use bevy_ecs::{component::Component, resource::Resource, schedule::IntoScheduleConfigs as _};
 use bevy_light::FogVolume;
 use bevy_math::{Vec2, Vec3};
 use bevy_mesh::{Mesh, Meshable};
@@ -45,7 +45,10 @@ use bevy_render::{
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 use bevy_shape::{Cuboid, Plane3d};
-use render::{volumetric_fog, VolumetricFogPipeline, VolumetricFogUniformBuffer};
+use render::{
+    volumetric_fog, VolumetricFogPipeline, VolumetricFogUniformBuffer,
+    VolumetricFogUpsamplePipeline,
+};
 
 use crate::{volumetric_fog::render::init_volumetric_fog_pipeline, MeshPipelineSystems};
 
@@ -53,6 +56,35 @@ pub mod render;
 
 /// A plugin that implements volumetric fog.
 pub struct VolumetricFogPlugin;
+
+/// **Fork addition (posthuman-resource/bevy, branch `phase-shift/half-res-fog`).**
+///
+/// Marches this camera's volumetric fog at `1 / divisor` of the view's
+/// resolution in each axis, then composites it onto the view at full
+/// resolution with a depth-aware (joint bilateral) upsample. Upstream Bevy
+/// always marches one ray per pixel, which at 3840×2054 is most of the frame.
+///
+/// Put it on the camera beside [`bevy_light::VolumetricFog`]. `divisor` 1 (or
+/// no component) is upstream's full-resolution path, byte for byte; 2 is half
+/// resolution (a quarter of the rays); values are clamped to
+/// `1..=`[`Self::MAX_DIVISOR`]. Assumes a perspective, reverse-Z projection
+/// for the depth weights (Bevy's default); an orthographic camera still
+/// renders, with softer edges.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumetricFogResolution {
+    /// The fog is marched at `ceil(width / divisor) × ceil(height / divisor)`.
+    pub divisor: u32,
+}
+
+impl VolumetricFogResolution {
+    /// The largest divisor honoured.
+    pub const MAX_DIVISOR: u32 = 8;
+
+    /// The divisor actually used, `1..=MAX_DIVISOR`.
+    pub fn effective_divisor(&self) -> u32 {
+        self.divisor.clamp(1, Self::MAX_DIVISOR)
+    }
+}
 
 #[derive(Resource)]
 pub struct FogAssets {
@@ -63,6 +95,8 @@ pub struct FogAssets {
 impl Plugin for VolumetricFogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "volumetric_fog.wesl");
+        // Fork: the low-resolution fog's composite (`VolumetricFogResolution`).
+        embedded_asset!(app, "volumetric_fog_upsample.wesl");
 
         let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
         let plane_mesh = meshes.add(Plane3d::new(Vec3::Z, Vec2::ONE).mesh());
@@ -80,6 +114,8 @@ impl Plugin for VolumetricFogPlugin {
                 cube_mesh,
             })
             .init_gpu_resource::<SpecializedRenderPipelines<VolumetricFogPipeline>>()
+            // Fork: `VolumetricFogResolution`'s composite pipelines.
+            .init_gpu_resource::<SpecializedRenderPipelines<VolumetricFogUpsamplePipeline>>()
             .init_gpu_resource::<VolumetricFogUniformBuffer>()
             .add_systems(
                 RenderStartup,
@@ -94,6 +130,9 @@ impl Plugin for VolumetricFogPlugin {
                     render::prepare_view_depth_textures_for_volumetric_fog
                         .in_set(RenderSystems::Prepare)
                         .before(prepare_core_3d_depth_textures),
+                    // Fork: `VolumetricFogResolution`'s low-resolution target.
+                    render::prepare_volumetric_fog_low_res_textures
+                        .in_set(RenderSystems::PrepareResources),
                 ),
             )
             .add_systems(
