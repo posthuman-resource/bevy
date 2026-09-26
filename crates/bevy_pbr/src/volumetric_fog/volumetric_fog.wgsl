@@ -110,8 +110,32 @@ fn henyey_greenstein(neg_LdotV: f32) -> f32 {
     return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
 }
 
+// Fork (`VolumetricFogResolution`): on the low-resolution path each fragment
+// of the low-res target marches the ray of one full-resolution pixel, its
+// block's representative `block * divisor + divisor / 2` (clamped to the
+// view). `volumetric_fog_upsample.wgsl` reads the depth at the same pixel to
+// weight the block when it composites, so the two must agree.
+#ifdef VOLUMETRIC_FOG_LOW_RES
+fn low_res_representative_pixel(low_res_xy: vec2<f32>) -> vec2<u32> {
+    let divisor = #{VOLUMETRIC_FOG_DIVISOR}u;
+    let full = vec2<u32>(floor(low_res_xy)) * divisor + vec2(divisor / 2u);
+    return min(full, textureDimensions(depth_texture) - vec2(1u));
+}
+#endif  // VOLUMETRIC_FOG_LOW_RES
+
 @fragment
-fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+fn fragment(@builtin(position) raster_position: vec4<f32>) -> @location(0) vec4<f32> {
+    // Fork: everything below reads `position` as a full-resolution fragment;
+    // only the rasterized depth (`z`, the hull's front face) is kept as is.
+#ifdef VOLUMETRIC_FOG_LOW_RES
+    let position = vec4(
+        vec2<f32>(low_res_representative_pixel(raster_position.xy)) + 0.5,
+        raster_position.zw
+    );
+#else
+    let position = raster_position;
+#endif  // VOLUMETRIC_FOG_LOW_RES
+
     // Unpack the `volumetric_fog` settings.
     let uvw_from_world = volumetric_fog.uvw_from_world;
     let fog_color = volumetric_fog.fog_color;

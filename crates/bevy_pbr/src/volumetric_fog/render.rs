@@ -5,6 +5,7 @@ use core::array;
 use bevy_asset::{load_embedded_asset, AssetId, AssetServer, Handle};
 use bevy_camera::Camera3d;
 use bevy_color::ColorToComponents as _;
+use bevy_core_pipeline::FullscreenShader;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     component::Component,
@@ -18,34 +19,43 @@ use bevy_light::{FogVolume, VolumetricFog, VolumetricLight};
 use bevy_math::{vec4, Affine3A, Mat4, Vec3, Vec3A, Vec4};
 use bevy_mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy_render::{
+    camera::ExtractedCamera,
+    diagnostic::RecordDiagnostics,
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
     render_resource::{
         binding_types::{
-            sampler, texture_3d, texture_depth_2d, texture_depth_2d_multisampled, uniform_buffer,
+            sampler, texture_2d, texture_3d, texture_depth_2d, texture_depth_2d_multisampled,
+            uniform_buffer,
         },
-        BindGroupLayoutDescriptor, BindGroupLayoutEntries, BindingResource, BlendComponent,
-        BlendFactor, BlendOperation, BlendState, CachedRenderPipelineId, ColorTargetState,
-        ColorWrites, DynamicBindGroupEntries, DynamicUniformBuffer, Face, FragmentState, LoadOp,
-        Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
-        RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-        SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
+        BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BindingResource,
+        BlendComponent, BlendFactor, BlendOperation, BlendState, CachedRenderPipelineId,
+        ColorTargetState, ColorWrites, DynamicBindGroupEntries, DynamicUniformBuffer, Extent3d,
+        Face, FragmentState, LoadOp, Operations, PipelineCache, PrimitiveState,
+        RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+        SamplerBindingType, ShaderStages, ShaderType, SpecializedRenderPipeline,
+        SpecializedRenderPipelines, StoreOp, TextureDescriptor, TextureDimension, TextureFormat,
         TextureSampleType, TextureUsages, VertexState,
     },
     renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
     sync_world::RenderEntity,
-    texture::GpuImage,
+    texture::{CachedTexture, GpuImage, TextureCache},
     view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
     Extract,
 };
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 use bevy_transform::components::GlobalTransform;
 use bevy_utils::prelude::default;
 use bitflags::bitflags;
 
 use crate::{MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, MeshViewBindGroup, ViewKeyCache};
 
-use super::FogAssets;
+use super::{FogAssets, VolumetricFogResolution};
+
+/// Fork: the format of `VolumetricFogResolution`'s low-resolution target. It
+/// holds premultiplied in-scattered light and `1 - transmittance`, so it needs
+/// alpha and HDR range whatever the view's own format is.
+const LOW_RES_FOG_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 bitflags! {
     /// Flags that describe the bind group layout used to render volumetric fog.
@@ -90,6 +100,24 @@ pub struct VolumetricFogPipeline {
     shader: Handle<Shader>,
 }
 
+/// Fork: the pipeline that composites `VolumetricFogResolution`'s
+/// low-resolution fog onto the view with a depth-aware upsample.
+#[derive(Resource)]
+pub struct VolumetricFogUpsamplePipeline {
+    /// Indexed by "the depth buffer is multisampled".
+    bind_group_layouts: [BindGroupLayoutDescriptor; 2],
+    fullscreen_shader: FullscreenShader,
+    shader: Handle<Shader>,
+}
+
+/// Fork: identifies one specialization of the upsample composite.
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub struct VolumetricFogUpsamplePipelineKey {
+    target_format: TextureFormat,
+    multisampled: bool,
+    divisor: u32,
+}
+
 /// The two render pipelines that we use for fog volumes: one for when a 3D
 /// density texture is present and one for when it isn't.
 #[derive(Component)]
@@ -99,7 +127,14 @@ pub struct ViewVolumetricFogPipelines {
     pub textureless: CachedRenderPipelineId,
     /// The render pipeline that we use when a density texture is present.
     pub textured: CachedRenderPipelineId,
+    /// Fork: the composite when the fog is marched at low resolution
+    /// (`VolumetricFogResolution`); `None` on upstream's full-resolution path.
+    pub upsample: Option<CachedRenderPipelineId>,
 }
+
+/// Fork: the low-resolution target `VolumetricFogResolution` marches into.
+#[derive(Component, Deref)]
+pub struct ViewVolumetricFogLowRes(CachedTexture);
 
 /// Identifies a single specialization of the volumetric fog shader.
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -119,6 +154,9 @@ pub struct VolumetricFogPipelineKey {
 
     /// The volumetric fog has a 3D voxel density texture.
     has_density_texture: bool,
+
+    /// Fork: `VolumetricFogResolution`'s divisor; 1 is upstream's path.
+    divisor: u32,
 }
 
 /// The same as [`VolumetricFog`] and [`FogVolume`], but formatted for
@@ -183,7 +221,32 @@ pub fn init_volumetric_fog_pipeline(
     mut commands: Commands,
     mesh_view_layouts: Res<MeshPipelineViewLayouts>,
     asset_server: Res<AssetServer>,
+    fullscreen_shader: Res<FullscreenShader>,
 ) {
+    // Fork: the upsample composite's layouts: the low-resolution fog and the
+    // full-resolution depth, one layout per depth sample count.
+    let upsample_layout = |multisampled: bool| {
+        BindGroupLayoutDescriptor::new(
+            "volumetric fog upsample bind group layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::FRAGMENT,
+                (
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    if multisampled {
+                        texture_depth_2d_multisampled()
+                    } else {
+                        texture_depth_2d()
+                    },
+                ),
+            ),
+        )
+    };
+    commands.insert_resource(VolumetricFogUpsamplePipeline {
+        bind_group_layouts: [upsample_layout(false), upsample_layout(true)],
+        fullscreen_shader: fullscreen_shader.clone(),
+        shader: load_embedded_asset!(asset_server.as_ref(), "volumetric_fog_upsample.wgsl"),
+    });
+
     // Create the bind group layout entries common to all bind group
     // layouts.
     let base_bind_group_layout_entries = &BindGroupLayoutEntries::single(
@@ -239,16 +302,27 @@ pub fn init_volumetric_fog_pipeline(
 /// from the main world to the render world.
 pub fn extract_volumetric_fog(
     mut commands: Commands,
-    view_targets: Extract<Query<(RenderEntity, &VolumetricFog)>>,
+    view_targets: Extract<
+        Query<(
+            RenderEntity,
+            &VolumetricFog,
+            Option<&VolumetricFogResolution>,
+        )>,
+    >,
     fog_volumes: Extract<Query<(RenderEntity, &FogVolume, &GlobalTransform)>>,
     volumetric_lights: Extract<Query<(RenderEntity, &VolumetricLight)>>,
 ) {
     if volumetric_lights.is_empty() {
         // TODO: needs better way to handle clean up in render world
         for (entity, ..) in view_targets.iter() {
-            commands
-                .entity(entity)
-                .remove::<(VolumetricFog, ViewVolumetricFogPipelines, ViewVolumetricFog)>();
+            commands.entity(entity).remove::<(
+                VolumetricFog,
+                ViewVolumetricFogPipelines,
+                ViewVolumetricFog,
+                // Fork: `VolumetricFogResolution` and its target.
+                VolumetricFogResolution,
+                ViewVolumetricFogLowRes,
+            )>();
         }
         for (entity, ..) in fog_volumes.iter() {
             commands.entity(entity).remove::<FogVolume>();
@@ -256,11 +330,21 @@ pub fn extract_volumetric_fog(
         return;
     }
 
-    for (entity, volumetric_fog) in view_targets.iter() {
-        commands
+    for (entity, volumetric_fog, resolution) in view_targets.iter() {
+        let mut view = commands
             .get_entity(entity)
-            .expect("Volumetric fog entity wasn't synced.")
-            .insert(*volumetric_fog);
+            .expect("Volumetric fog entity wasn't synced.");
+        view.insert(*volumetric_fog);
+        // Fork: the render entity is retained, so an absent resolution is
+        // removed rather than left from an earlier frame.
+        match resolution {
+            Some(resolution) if resolution.effective_divisor() > 1 => {
+                view.insert(*resolution);
+            }
+            _ => {
+                view.remove::<(VolumetricFogResolution, ViewVolumetricFogLowRes)>();
+            }
+        }
     }
 
     for (entity, fog_volume, fog_transform) in fog_volumes.iter() {
@@ -287,10 +371,14 @@ pub fn volumetric_fog(
         &ViewVolumetricFog,
         &MeshViewBindGroup,
         &Msaa,
+        // Fork: `VolumetricFogResolution`'s target, when the fog is low-res.
+        Option<&ViewVolumetricFogLowRes>,
     )>,
     pipeline_cache: Res<PipelineCache>,
     volumetric_lighting_pipeline: Res<VolumetricFogPipeline>,
     volumetric_lighting_uniform_buffers: Res<VolumetricFogUniformBuffer>,
+    // Fork: the composite for the low-res path.
+    upsample_pipeline: Res<VolumetricFogUpsamplePipeline>,
     image_assets: Res<RenderAssets<GpuImage>>,
     mesh_allocator: Res<MeshAllocator>,
     fog_assets: Res<FogAssets>,
@@ -304,6 +392,7 @@ pub fn volumetric_fog(
         view_fog_volumes,
         view_bind_group,
         msaa,
+        low_res,
     ) = view.into_inner();
 
     // Fetch the uniform buffer and binding.
@@ -320,8 +409,38 @@ pub fn volumetric_fog(
         return;
     };
 
+    // Fork: on the low-res path the volumes are marched into the low-res
+    // target and composited afterwards. The march pipelines were specialized
+    // for that target's format, so without the target or the composite
+    // pipeline nothing is drawn this frame.
+    let low_res = match view_volumetric_lighting_pipelines.upsample {
+        None => None,
+        Some(upsample_id) => {
+            let (Some(low_res), Some(upsample)) =
+                (low_res, pipeline_cache.get_render_pipeline(upsample_id))
+            else {
+                return;
+            };
+            Some((low_res, upsample))
+        }
+    };
+
+    // Fork: a GPU span, so the fog is a named zone in Tracy and in
+    // `RenderDiagnosticsPlugin` rather than the gap between two others.
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let time_span = diagnostics.time_span(ctx.command_encoder(), "volumetric_fog");
+
     let command_encoder = ctx.command_encoder();
     command_encoder.push_debug_group("volumetric_lighting");
+
+    // Fork: the target the volumes are drawn into, and its first load: the
+    // low-res target starts transparent every frame; the view is blended onto.
+    let (fog_target, mut fog_load) = match low_res {
+        Some((low_res, _)) => (&low_res.default_view, LoadOp::Clear(default())),
+        None => (view_target.main_texture_view(), LoadOp::Load),
+    };
+    let mut marched = false;
 
     for view_fog_volume in view_fog_volumes.iter() {
         // If the camera is outside the fog volume, pick the cube mesh;
@@ -352,7 +471,9 @@ pub fn volumetric_fog(
         // This should always succeed, but if the asset was unloaded don't
         // panic.
         let Some(render_mesh) = render_meshes.get(&mesh_handle) else {
-            return;
+            // Fork: `break`, not `return`, so the debug group and the GPU
+            // span below are closed.
+            break;
         };
 
         // Create the bind group for the view.
@@ -391,11 +512,12 @@ pub fn volumetric_fog(
         let render_pass_descriptor = RenderPassDescriptor {
             label: Some("volumetric lighting pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: view_target.main_texture_view(),
+                // Fork: the low-res target on that path (upstream: the view).
+                view: fog_target,
                 depth_slice: None,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Load,
+                    load: fog_load,
                     store: StoreOp::Store,
                 },
             })],
@@ -404,6 +526,10 @@ pub fn volumetric_fog(
             occlusion_query_set: None,
             multiview_mask: None,
         };
+
+        // Fork: only the first volume clears the low-res target.
+        fog_load = LoadOp::Load;
+        marched = true;
 
         let command_encoder = ctx.command_encoder();
         let mut render_pass = command_encoder.begin_render_pass(&render_pass_descriptor);
@@ -442,7 +568,42 @@ pub fn volumetric_fog(
         }
     }
 
+    // Fork: composite the low-res fog onto the view, once, if anything was
+    // marched into it this frame (it starts transparent, so an empty target
+    // would be a no-op anyway, but an uncleared one would not be).
+    if let Some((low_res, upsample)) = low_res
+        && marched
+    {
+        let multisampled = !matches!(*msaa, Msaa::Off);
+        let bind_group = ctx.render_device().create_bind_group(
+            "volumetric fog upsample bind group",
+            &pipeline_cache
+                .get_bind_group_layout(&upsample_pipeline.bind_group_layouts[multisampled as usize]),
+            &BindGroupEntries::sequential((&low_res.default_view, view_depth_texture.view())),
+        );
+        let mut composite = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
+            label: Some("volumetric fog upsample pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: view_target.main_texture_view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        composite.set_pipeline(upsample);
+        composite.set_bind_group(0, &bind_group, &[]);
+        composite.draw(0..3, 0..1);
+    }
+
     ctx.command_encoder().pop_debug_group();
+    time_span.end(ctx.command_encoder());
 }
 
 impl SpecializedRenderPipeline for VolumetricFogPipeline {
@@ -496,6 +657,16 @@ impl SpecializedRenderPipeline for VolumetricFogPipeline {
             shader_defs.push("DENSITY_TEXTURE".into());
         }
 
+        // Fork: march one ray per `divisor × divisor` block of the view
+        // (`VolumetricFogResolution`).
+        if key.divisor > 1 {
+            shader_defs.push("VOLUMETRIC_FOG_LOW_RES".into());
+            shader_defs.push(ShaderDefVal::UInt(
+                "VOLUMETRIC_FOG_DIVISOR".into(),
+                key.divisor,
+            ));
+        }
+
         let layout = self
             .mesh_view_layouts
             .get_view_layout(key.mesh_pipeline_view_key);
@@ -531,10 +702,21 @@ impl SpecializedRenderPipeline for VolumetricFogPipeline {
                             dst_factor: BlendFactor::OneMinusSrcAlpha,
                             operation: BlendOperation::Add,
                         },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::Zero,
-                            dst_factor: BlendFactor::One,
-                            operation: BlendOperation::Add,
+                        // Fork: the low-res target accumulates coverage too,
+                        // `1 - Π transmittance`, for the composite to blend
+                        // with; the view's own alpha is left alone as upstream.
+                        alpha: if key.divisor > 1 {
+                            BlendComponent {
+                                src_factor: BlendFactor::One,
+                                dst_factor: BlendFactor::OneMinusSrcAlpha,
+                                operation: BlendOperation::Add,
+                            }
+                        } else {
+                            BlendComponent {
+                                src_factor: BlendFactor::Zero,
+                                dst_factor: BlendFactor::One,
+                                operation: BlendOperation::Add,
+                            }
                         },
                     }),
                     write_mask: ColorWrites::ALL,
@@ -552,8 +734,14 @@ pub fn prepare_volumetric_fog_pipelines(
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VolumetricFogPipeline>>,
     volumetric_lighting_pipeline: Res<VolumetricFogPipeline>,
+    // Fork: the low-res composite (`VolumetricFogResolution`).
+    mut upsample_pipelines: ResMut<SpecializedRenderPipelines<VolumetricFogUpsamplePipeline>>,
+    upsample_pipeline: Res<VolumetricFogUpsamplePipeline>,
     fog_assets: Res<FogAssets>,
-    view_targets: Query<(Entity, &ExtractedView), With<VolumetricFog>>,
+    view_targets: Query<
+        (Entity, &ExtractedView, Option<&VolumetricFogResolution>),
+        With<VolumetricFog>,
+    >,
     meshes: Res<RenderAssets<RenderMesh>>,
     view_key_cache: Res<ViewKeyCache>,
 ) {
@@ -562,17 +750,39 @@ pub fn prepare_volumetric_fog_pipelines(
         return;
     };
 
-    for (entity, view) in view_targets.iter() {
+    for (entity, view, resolution) in view_targets.iter() {
         let Some(mesh_pipeline_key) = view_key_cache.get(&view.retained_view_entity) else {
             continue;
         };
 
+        // Fork: at a divisor above 1 the volumes are marched into the
+        // low-res target, and a composite puts them on the view.
+        let divisor = resolution.map_or(1, VolumetricFogResolution::effective_divisor);
+        let mesh_pipeline_view_key: MeshPipelineViewLayoutKey = (*mesh_pipeline_key).into();
+        let upsample = (divisor > 1).then(|| {
+            upsample_pipelines.specialize(
+                &pipeline_cache,
+                &upsample_pipeline,
+                VolumetricFogUpsamplePipelineKey {
+                    target_format: view.target_format,
+                    multisampled: mesh_pipeline_view_key
+                        .contains(MeshPipelineViewLayoutKey::MULTISAMPLED),
+                    divisor,
+                },
+            )
+        });
+
         // Specialize the pipeline.
         let textureless_pipeline_key = VolumetricFogPipelineKey {
-            mesh_pipeline_view_key: (*mesh_pipeline_key).into(),
+            mesh_pipeline_view_key,
             vertex_buffer_layout: plane_mesh.layout.clone(),
-            target_format: view.target_format,
+            target_format: if divisor > 1 {
+                LOW_RES_FOG_FORMAT
+            } else {
+                view.target_format
+            },
             has_density_texture: false,
+            divisor,
         };
         let textureless_pipeline_id = pipelines.specialize(
             &pipeline_cache,
@@ -591,7 +801,87 @@ pub fn prepare_volumetric_fog_pipelines(
         commands.entity(entity).insert(ViewVolumetricFogPipelines {
             textureless: textureless_pipeline_id,
             textured: textured_pipeline_id,
+            upsample,
         });
+    }
+}
+
+/// Fork: allocates `VolumetricFogResolution`'s low-resolution target,
+/// `ceil(width / divisor) × ceil(height / divisor)` of the camera's target.
+pub fn prepare_volumetric_fog_low_res_textures(
+    mut commands: Commands,
+    mut texture_cache: ResMut<TextureCache>,
+    render_device: Res<RenderDevice>,
+    views: Query<(Entity, &ExtractedCamera, &VolumetricFogResolution), With<VolumetricFog>>,
+) {
+    for (entity, camera, resolution) in &views {
+        let Some(size) = camera.physical_target_size else {
+            continue;
+        };
+        let divisor = resolution.effective_divisor();
+        let texture = texture_cache.get(
+            &render_device,
+            TextureDescriptor {
+                label: Some("volumetric_fog_low_res_texture"),
+                size: Extent3d {
+                    width: size.x.div_ceil(divisor).max(1),
+                    height: size.y.div_ceil(divisor).max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: LOW_RES_FOG_FORMAT,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        commands
+            .entity(entity)
+            .insert(ViewVolumetricFogLowRes(texture));
+    }
+}
+
+impl SpecializedRenderPipeline for VolumetricFogUpsamplePipeline {
+    type Key = VolumetricFogUpsamplePipelineKey;
+
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let mut shader_defs = vec![ShaderDefVal::UInt(
+            "VOLUMETRIC_FOG_DIVISOR".into(),
+            key.divisor,
+        )];
+        if key.multisampled {
+            shader_defs.push("MULTISAMPLED".into());
+        }
+        RenderPipelineDescriptor {
+            label: Some("volumetric fog upsample pipeline".into()),
+            layout: vec![self.bind_group_layouts[key.multisampled as usize].clone()],
+            vertex: self.fullscreen_shader.to_vertex_state(),
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                shader_defs,
+                targets: vec![Some(ColorTargetState {
+                    format: key.target_format,
+                    // Premultiplied fog over the view, exactly as upstream's
+                    // full-resolution pass blends it.
+                    blend: Some(BlendState {
+                        color: BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::OneMinusSrcAlpha,
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::Zero,
+                            dst_factor: BlendFactor::One,
+                            operation: BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: ColorWrites::ALL,
+                })],
+                ..default()
+            }),
+            ..default()
+        }
     }
 }
 
