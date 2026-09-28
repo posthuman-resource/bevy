@@ -19,7 +19,27 @@ use bevy_log::info_span;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy_tasks::ComputeTaskPool;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicBool, Ordering};
 use wgpu::CommandBuffer;
+
+/// Finish every frame's command encoders on the render thread, one after
+/// another, instead of in parallel on the [`ComputeTaskPool`].
+///
+/// A process-wide switch for drivers that crash when command buffers are
+/// finished on several threads at once (Mesa's Dozen, `dzn`, under WSL).
+/// Off by default, which keeps upstream's parallel finish.
+static SEQUENTIAL_COMMAND_FINISH: AtomicBool = AtomicBool::new(false);
+
+/// Turn [`SEQUENTIAL_COMMAND_FINISH`] on or off. Set it before the renderer
+/// starts drawing.
+pub fn set_sequential_command_finish(sequential: bool) {
+    SEQUENTIAL_COMMAND_FINISH.store(sequential, Ordering::Relaxed);
+}
+
+/// Whether frames finish their command encoders sequentially.
+pub fn sequential_command_finish() -> bool {
+    SEQUENTIAL_COMMAND_FINISH.load(Ordering::Relaxed)
+}
 
 #[derive(Default)]
 struct PendingCommandBuffersInner {
@@ -84,7 +104,12 @@ impl PendingCommandBuffers {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            finish_parallel(commands)
+            let finished: alloc::vec::Vec<CommandBuffer> = if sequential_command_finish() {
+                finish_sequential(commands).collect()
+            } else {
+                finish_parallel(commands).collect()
+            };
+            finished.into_iter()
         }
     }
 
@@ -100,8 +125,8 @@ impl PendingCommandBuffers {
 /// Finishes pending command buffers sequentially, preserving their order.
 ///
 /// Used on wasm, where wgpu command encoders and buffers are `!Send` and so
-/// cannot be finished across task pool threads.
-#[cfg(target_arch = "wasm32")]
+/// cannot be finished across task pool threads, and wherever
+/// [`set_sequential_command_finish`] turned it on.
 fn finish_sequential(
     commands: impl Iterator<Item = PendingCommandBuffer>,
 ) -> impl Iterator<Item = CommandBuffer> {
