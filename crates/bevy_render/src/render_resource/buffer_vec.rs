@@ -1,7 +1,7 @@
 use core::{iter, marker::PhantomData, ops::Range, slice};
 
 use crate::{
-    render_resource::{AtomicPod, Buffer},
+    render_resource::{AtomicPod, Buffer, BufferId},
     renderer::{RenderDevice, RenderQueue},
 };
 use bytemuck::{must_cast_slice, NoUninit};
@@ -13,6 +13,10 @@ use thiserror::Error;
 use wgpu::{BindingResource, BufferAddress, BufferUsages};
 
 use super::GpuArrayBufferable;
+
+#[cfg(test)]
+#[path = "buffer_vec_tests.rs"]
+mod tests;
 
 /// A structure for storing raw bytes that have already been properly formatted
 /// for use by the GPU.
@@ -45,6 +49,9 @@ pub struct RawBufferVec<T: NoUninit> {
     buffer_usage: BufferUsages,
     label: Option<String>,
     changed: bool,
+    /// Exact contents of the last opt-in read-only upload. Ordinary writes
+    /// retain their unconditional semantics and invalidate this snapshot.
+    uploaded_bytes: Option<(BufferId, Vec<u8>)>,
 }
 
 impl<T: NoUninit> RawBufferVec<T> {
@@ -58,6 +65,7 @@ impl<T: NoUninit> RawBufferVec<T> {
             buffer_usage,
             label: None,
             changed: false,
+            uploaded_bytes: None,
         }
     }
 
@@ -164,6 +172,7 @@ impl<T: NoUninit> RawBufferVec<T> {
                 mapped_at_creation: false,
             }));
             self.changed = false;
+            self.uploaded_bytes = None;
         }
     }
 
@@ -173,6 +182,7 @@ impl<T: NoUninit> RawBufferVec<T> {
     /// Before queuing the write, a [`reserve`](RawBufferVec::reserve) operation
     /// is executed.
     pub fn write_buffer(&mut self, device: &RenderDevice, queue: &RenderQueue) {
+        self.uploaded_bytes = None;
         if self.values.is_empty() {
             return;
         }
@@ -182,6 +192,41 @@ impl<T: NoUninit> RawBufferVec<T> {
             let bytes: &[u8] = must_cast_slice(&self.values);
             queue.write_buffer(buffer, 0, &bytes[range]);
         }
+    }
+
+    /// Uploads only when the exact CPU bytes differ from the last upload.
+    ///
+    /// Only use this for buffers that the GPU never writes. GPU-written
+    /// buffers still require [`Self::write_buffer`] to restore their contents.
+    /// Reallocation and ordinary whole/range writes invalidate the snapshot.
+    pub fn write_buffer_if_changed(&mut self, device: &RenderDevice, queue: &RenderQueue) {
+        if self.values.is_empty() {
+            return;
+        }
+        self.reserve(self.values.len(), device);
+        if let Some(buffer) = &self.buffer {
+            if self.upload_is_current(buffer.id()) {
+                return;
+            }
+            let bytes: &[u8] = must_cast_slice(&self.values);
+            queue.write_buffer(buffer, 0, bytes);
+            self.remember_upload(buffer.id());
+        }
+    }
+
+    fn upload_is_current(&self, buffer_id: BufferId) -> bool {
+        self.uploaded_bytes.as_ref().is_some_and(|(id, bytes)| {
+            *id == buffer_id && bytes.as_slice() == must_cast_slice(&self.values)
+        })
+    }
+
+    fn remember_upload(&mut self, buffer_id: BufferId) {
+        let (id, uploaded) = self
+            .uploaded_bytes
+            .get_or_insert_with(|| (buffer_id, Vec::new()));
+        *id = buffer_id;
+        uploaded.clear();
+        uploaded.extend_from_slice(must_cast_slice(&self.values));
     }
 
     /// Queues writing of data from system RAM to VRAM using the [`RenderDevice`]
@@ -198,6 +243,7 @@ impl<T: NoUninit> RawBufferVec<T> {
         render_queue: &RenderQueue,
         range: Range<usize>,
     ) -> Result<(), WriteBufferRangeError> {
+        self.uploaded_bytes = None;
         if self.values.is_empty() {
             return Err(WriteBufferRangeError::NoValuesToUpload);
         }
