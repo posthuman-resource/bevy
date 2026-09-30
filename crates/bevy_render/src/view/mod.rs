@@ -1355,9 +1355,16 @@ pub fn clear_view_attachments(mut view_target_attachments: ResMut<ViewTargetAtta
 pub fn cleanup_view_targets_for_resize(
     mut commands: Commands,
     windows: Query<(MainEntity, &ExtractedWindow)>,
-    cameras: Query<(Entity, &ExtractedCamera), With<ViewTarget>>,
+    cameras: Query<(Entity, Option<&ExtractedCamera>), With<ViewTarget>>,
 ) {
     for (entity, camera) in &cameras {
+        // Inactive or invalid cameras lose ExtractedCamera during extraction,
+        // but can still own the previous frame's swapchain view. Release those
+        // references too: DX12 ResizeBuffers rejects any outstanding buffer.
+        let Some(camera) = camera else {
+            commands.entity(entity).remove::<ViewTarget>();
+            continue;
+        };
         if let Some(NormalizedRenderTarget::Window(window_ref)) = &camera.target
             && let Some((_, window)) = windows.iter().find(|(e, _)| *e == window_ref.entity())
             && (window.size_changed || window.present_mode_changed)
