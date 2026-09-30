@@ -234,6 +234,14 @@ pub struct SurfaceData {
     texture_view_format: Option<TextureFormat>,
 }
 
+/// Optional application policy for selecting a mode from the actual surface's
+/// capabilities before configuring it. Returning `None` uses Bevy's defaults.
+/// A returned mode must be listed in `SurfaceCapabilities::present_modes`.
+#[derive(Resource)]
+pub struct SurfacePresentModePolicy(
+    pub fn(PresentMode, &wgpu::SurfaceCapabilities) -> Option<wgpu::PresentMode>,
+);
+
 /// (re)configures window surfaces, and obtains a swapchain texture for rendering.
 ///
 /// NOTE: `get_current_texture` in `prepare_windows` can take a long time if the GPU workload is
@@ -379,6 +387,7 @@ pub fn create_surfaces(
     render_instance: Res<RenderInstance>,
     render_adapter: Res<RenderAdapter>,
     render_device: Res<RenderDevice>,
+    present_mode_policy: Option<Res<SurfacePresentModePolicy>>,
 ) {
     for (entity, mut window, handle, mut maybe_surface_data) in &mut windows {
         let Some(data) = maybe_surface_data.as_mut() else {
@@ -395,7 +404,7 @@ pub fn create_surfaces(
                     .expect("Failed to create wgpu surface")
             };
             let caps = surface.get_capabilities(&render_adapter);
-            let present_mode = present_mode(&window, &caps);
+            let present_mode = select_present_mode(&window, &caps, present_mode_policy.as_deref());
             let formats = caps.formats;
             // For future HDR output support, we'll need to request a format that supports HDR,
             // but as of wgpu 0.15 that is not yet supported.
@@ -463,10 +472,26 @@ pub fn create_surfaces(
             data.configuration.width = window.physical_width;
             data.configuration.height = window.physical_height;
             let caps = data.surface.get_capabilities(&render_adapter);
-            data.configuration.present_mode = present_mode(&window, &caps);
+            data.configuration.present_mode =
+                select_present_mode(&window, &caps, present_mode_policy.as_deref());
             render_device.configure_surface(&data.surface, &data.configuration);
         }
     }
+}
+
+fn select_present_mode(
+    window: &ExtractedWindow,
+    caps: &wgpu::SurfaceCapabilities,
+    policy: Option<&SurfacePresentModePolicy>,
+) -> wgpu::PresentMode {
+    if let Some(mode) = policy.and_then(|policy| (policy.0)(window.present_mode, caps)) {
+        assert!(
+            caps.present_modes.contains(&mode),
+            "Surface present mode policy selected an unsupported mode"
+        );
+        return mode;
+    }
+    present_mode(window, caps)
 }
 
 fn present_mode(window: &ExtractedWindow, caps: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
