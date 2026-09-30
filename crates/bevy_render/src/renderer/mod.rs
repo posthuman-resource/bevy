@@ -1,5 +1,6 @@
 #[cfg(feature = "raw_vulkan_init")]
 pub mod raw_vulkan_init;
+mod counters;
 mod render_context;
 mod render_device;
 mod wgpu_wrapper;
@@ -8,6 +9,7 @@ pub use render_context::{
     sequential_command_finish, set_sequential_command_finish, CurrentView, FlushCommands,
     PendingCommandBuffers, RenderContext, RenderContextState, ViewQuery,
 };
+pub use counters::{RenderCounters, RenderCountersFrame, RENDER_COUNTERS};
 pub use render_device::*;
 
 pub(crate) use wgpu_wrapper::wgpu_wrapper;
@@ -155,6 +157,44 @@ wgpu_wrapper! {
     /// The [`AdapterInfo`] of the adapter in use by the renderer.
     #[derive(Resource, Clone)]
     pub struct RenderAdapterInfo(AdapterInfo);
+}
+
+/// The queue's uploads, counted in [`RENDER_COUNTERS`]. These inherent
+/// methods shadow the [`Queue`] methods reached through `Deref`, so every
+/// `render_queue.write_*` call is counted without changing its call site.
+impl RenderQueue {
+    /// [`Queue::write_buffer`], counted.
+    #[inline]
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: wgpu::BufferAddress, data: &[u8]) {
+        RENDER_COUNTERS.buffer_write(data.len() as u64);
+        Queue::write_buffer(self, buffer, offset, data);
+    }
+
+    /// [`Queue::write_buffer_with`], counted.
+    #[inline]
+    #[must_use]
+    pub fn write_buffer_with(
+        &self,
+        buffer: &wgpu::Buffer,
+        offset: wgpu::BufferAddress,
+        size: wgpu::BufferSize,
+    ) -> Option<wgpu::QueueWriteBufferView> {
+        RENDER_COUNTERS.buffer_write(size.get());
+        Queue::write_buffer_with(self, buffer, offset, size)
+    }
+
+    /// [`Queue::write_texture`], counted.
+    #[inline]
+    pub fn write_texture(
+        &self,
+        texture: wgpu::TexelCopyTextureInfo<'_>,
+        data: &[u8],
+        data_layout: wgpu::TexelCopyBufferLayout,
+        size: wgpu::Extent3d,
+    ) {
+        RENDER_COUNTERS.texture_write(data.len() as u64);
+        Queue::write_texture(self, texture, data, data_layout, size);
+    }
 }
 
 const GPU_NOT_FOUND_ERROR_MESSAGE: &str = if cfg!(target_os = "linux") {

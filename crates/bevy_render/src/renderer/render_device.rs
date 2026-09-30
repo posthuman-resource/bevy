@@ -1,4 +1,4 @@
-use super::RenderQueue;
+use super::{RenderQueue, RENDER_COUNTERS};
 use crate::render_resource::{
     BindGroup, BindGroupLayout, Buffer, ComputePipeline, RawMeshPipelineDescriptor,
     RawRenderPipelineDescriptor, RenderPipeline, Sampler, Texture,
@@ -63,6 +63,7 @@ impl RenderDevice {
         &self,
         desc: wgpu::ShaderModuleDescriptor,
     ) -> wgpu::ShaderModule {
+        RENDER_COUNTERS.shader_module();
         #[cfg(feature = "spirv_shader_passthrough")]
         match &desc.source {
             wgpu::ShaderSource::SpirV(source)
@@ -108,6 +109,7 @@ impl RenderDevice {
         &self,
         desc: wgpu::ShaderModuleDescriptor,
     ) -> wgpu::ShaderModule {
+        RENDER_COUNTERS.shader_module();
         #[cfg(feature = "spirv_shader_passthrough")]
         match &desc.source {
             wgpu::ShaderSource::SpirV(_source) => panic!("no safety checks are performed for spirv shaders. use `create_shader_module` instead"),
@@ -157,6 +159,7 @@ impl RenderDevice {
         layout: &'a BindGroupLayout,
         entries: &'a [BindGroupEntry<'a>],
     ) -> BindGroup {
+        RENDER_COUNTERS.bind_group();
         let wgpu_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: label.into(),
             layout,
@@ -193,6 +196,7 @@ impl RenderDevice {
     /// Creates a [`RenderPipeline`].
     #[inline]
     pub fn create_render_pipeline(&self, desc: &RawRenderPipelineDescriptor) -> RenderPipeline {
+        RENDER_COUNTERS.pipeline();
         let wgpu_render_pipeline = self.device.create_render_pipeline(desc);
         RenderPipeline::from(wgpu_render_pipeline)
     }
@@ -203,6 +207,7 @@ impl RenderDevice {
         &self,
         desc: &wgpu::ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        RENDER_COUNTERS.pipeline();
         let wgpu_compute_pipeline = self.device.create_compute_pipeline(desc);
         ComputePipeline::from(wgpu_compute_pipeline)
     }
@@ -210,18 +215,21 @@ impl RenderDevice {
     /// Creates a [`RenderPipeline`] from a [`RawMeshPipelineDescriptor`].
     #[inline]
     pub fn create_mesh_pipeline(&self, desc: &RawMeshPipelineDescriptor) -> RenderPipeline {
+        RENDER_COUNTERS.pipeline();
         let wgpu_mesh_pipeline = self.device.create_mesh_pipeline(desc);
         RenderPipeline::from(wgpu_mesh_pipeline)
     }
 
     /// Creates a [`Buffer`].
     pub fn create_buffer(&self, desc: &wgpu::BufferDescriptor) -> Buffer {
+        RENDER_COUNTERS.buffer_created(desc.size);
         let wgpu_buffer = self.device.create_buffer(desc);
         Buffer::from(wgpu_buffer)
     }
 
     /// Creates a [`Buffer`] and initializes it with the specified data.
     pub fn create_buffer_with_data(&self, desc: &wgpu::util::BufferInitDescriptor) -> Buffer {
+        RENDER_COUNTERS.buffer_created(desc.contents.len() as u64);
         let wgpu_buffer = self.device.create_buffer_init(desc);
         Buffer::from(wgpu_buffer)
     }
@@ -237,6 +245,8 @@ impl RenderDevice {
         order: wgpu::util::TextureDataOrder,
         data: &[u8],
     ) -> Texture {
+        RENDER_COUNTERS.texture_created();
+        RENDER_COUNTERS.texture_write(data.len() as u64);
         let wgpu_texture = self
             .device
             .create_texture_with_data(render_queue, desc, order, data);
@@ -247,6 +257,7 @@ impl RenderDevice {
     ///
     /// `desc` specifies the general format of the texture.
     pub fn create_texture(&self, desc: &wgpu::TextureDescriptor) -> Texture {
+        RENDER_COUNTERS.texture_created();
         let wgpu_texture = self.device.create_texture(desc);
         Texture::from(wgpu_texture)
     }
