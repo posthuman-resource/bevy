@@ -2944,14 +2944,17 @@ pub fn write_binned_instance_buffers<BPI, GFBD>(
 
             // Write the various buffers to the GPU.
 
+            // These three arrays are persistent, CPU-owned read-only GPU
+            // inputs. A static batch set does not need fresh staging writes
+            // every frame; byte changes and reallocation still upload.
             batch_set
                 .gpu_buffers
                 .render_binned_mesh_instance_buffer
-                .write_buffer(&render_device, &render_queue);
+                .write_buffer_if_changed(&render_device, &render_queue);
             batch_set
                 .gpu_buffers
                 .bin_metadata_buffer
-                .write_buffer(&render_device, &render_queue);
+                .write_buffer_if_changed(&render_device, &render_queue);
             batch_set
                 .gpu_buffers
                 .fan_buffer
@@ -2959,7 +2962,7 @@ pub fn write_binned_instance_buffers<BPI, GFBD>(
             batch_set
                 .gpu_buffers
                 .bin_index_to_bin_metadata_index_buffer
-                .write_buffer(&render_device, &render_queue);
+                .write_buffer_if_changed(&render_device, &render_queue);
 
             let (
                 Some(render_bin_entry_buffer),
