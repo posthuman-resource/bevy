@@ -861,10 +861,20 @@ fn directional_light(
         diffuse = diffuse_color * Fd_Burley(input, &derived_input);
     }
 
+    // The sun is a disc, not a point: widen the lobe by its angular radius (`sun_disk_angular_size / 2`) and
+    // normalise its energy, the sphere-light rule of `point_light` (Karis 2013). A size of 0 is the point light.
+    let a_prime = saturate(roughness + (*light).sun_disk_angular_size / 4.0);
+    var specular_intensity = 1.0;
+    var brdf_roughness = roughness;
+    if a_prime > roughness {
+        specular_intensity = (roughness / a_prime) * (roughness / a_prime);
+        brdf_roughness = mix(roughness, a_prime, specular_fix_remap(roughness));
+    }
+
 @if(STANDARD_MATERIAL_ANISOTROPY)
-    let specular_light = specular_anisotropy(input, &derived_input, L, roughness, 1.0);
+    let specular_light = specular_anisotropy(input, &derived_input, L, brdf_roughness, specular_intensity);
 @else   // STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular(input, &derived_input, roughness, 1.0);
+    let specular_light = specular(input, &derived_input, brdf_roughness, specular_intensity);
 
     @if(STANDARD_MATERIAL_CLEARCOAT)
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;
