@@ -65,6 +65,8 @@ struct Lights {
     /// NOTE: this array size must be kept in sync with the constants defined in bevy_pbr/src/render/light.rs
     directional_lights: array<DirectionalLight, u32(constants::MAX_DIRECTIONAL_LIGHTS)>,
     ambient_color: vec4<f32>,
+    /// x is the sun disc's edge softness, y its limb darkening
+    sun_disc_shape: vec4<f32>,
     /// x/y/z dimensions and n_clusters in w
     cluster_dimensions: vec4<u32>,
     /// xy are vec2<f32>(cluster_dimensions.xy) / vec2<f32>(view.width, view.height)

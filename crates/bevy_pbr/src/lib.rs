@@ -207,6 +207,8 @@ impl Plugin for PbrPlugin {
 
         app.register_asset_reflect::<StandardMaterial>()
             .init_resource::<DefaultOpaqueRendererMethod>()
+            .init_resource::<SunDiscShape>()
+            .add_plugins(ExtractResourcePlugin::<SunDiscShape>::default())
             .add_plugins((
                 MeshRenderPlugin {
                     use_gpu_instance_buffer_builder: self.use_gpu_instance_buffer_builder,

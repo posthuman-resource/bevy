@@ -237,9 +237,16 @@ fn sample_sun_radiance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
         let sun_angular_size = (*light).sun_disk_angular_size;
         let sun_intensity = (*light).sun_disk_intensity;
         if sun_angular_size > 0.0 && sun_intensity > 0.0 {
-            let factor = 1 - smoothstep(sun_angular_size * 0.5 - w, sun_angular_size * 0.5 + w, angle_to_sun);
+            // The edge softens inwards over `edge_softness` of the radius; limb darkening I(mu) = 1 - u (1 - mu) on
+            // the sun's sphere is divided by its disc mean 1 - u / 3, so the disc keeps its energy.
+            let edge_softness = lights.sun_disc_shape.x;
+            let limb_u = lights.sun_disc_shape.y;
+            let radius = sun_angular_size * 0.5;
+            let factor = 1 - smoothstep(radius * (1.0 - edge_softness) - w, radius + w, angle_to_sun);
+            let rho = min(angle_to_sun / radius, 1.0);
+            let limb = (1.0 - limb_u * (1.0 - sqrt(1.0 - rho * rho))) / (1.0 - limb_u / 3.0);
             let sun_solid_angle = (sun_angular_size * sun_angular_size) * 0.25 * PI;
-            sun_radiance += ((*light).color.rgb / sun_solid_angle) * sun_intensity * factor * shadow_factor;
+            sun_radiance += ((*light).color.rgb / sun_solid_angle) * sun_intensity * factor * limb * shadow_factor;
         }
     }
     return sun_radiance;

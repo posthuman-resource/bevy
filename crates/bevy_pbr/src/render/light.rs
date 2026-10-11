@@ -46,6 +46,7 @@ use bevy_render::mesh::allocator::MeshSlabs;
 use bevy_render::occlusion_culling::{
     OcclusionCulling, OcclusionCullingSubview, OcclusionCullingSubviewEntities,
 };
+use bevy_render::extract_resource::ExtractResource;
 use bevy_render::sync_world::{MainEntity, MainEntityHashMap, MainEntityHashSet, RenderEntity};
 use bevy_render::view::{
     RenderExtractedShadowMapVisibleEntities, RenderShadowLodOrigin, RenderShadowMapVisibleEntities,
@@ -205,10 +206,25 @@ bitflags::bitflags! {
     }
 }
 
+/// The look of the sun disc the atmosphere draws (`SunDisk` sets its size and brightness). The default is
+/// Bevy's disc: flat radiance with a one-pixel edge.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, ExtractResource)]
+#[extract_app(RenderApp)]
+pub struct SunDiscShape {
+    /// How far the edge softens inwards, as a fraction of the disc's radius: 0 is a hard edge, 1 fades from the
+    /// centre.
+    pub edge_softness: f32,
+    /// Limb darkening `u` of `I(mu) = 1 - u (1 - mu)`, `mu` the cosine of the angle from the disc's centre
+    /// on the sun's sphere: 0 is a flat disc, about 0.6 the real sun's. The disc's total energy is kept.
+    pub limb_darkening: f32,
+}
+
 #[derive(Copy, Clone, Debug, ShaderType)]
 pub struct GpuLights {
     directional_lights: [GpuDirectionalLight; MAX_DIRECTIONAL_LIGHTS],
     ambient_color: Vec4,
+    // x is the sun disc's edge softness, y its limb darkening
+    sun_disc_shape: Vec4,
     // xyz are x/y/z cluster dimensions and w is the number of clusters
     cluster_dimensions: UVec4,
     // xy are vec2<f32>(cluster_dimensions.xy) / vec2<f32>(view.width, view.height)
@@ -1067,6 +1083,7 @@ pub fn prepare_lights(
         With<Camera3d>,
     >,
     ambient_light: Res<GlobalAmbientLight>,
+    sun_disc_shape: Option<Res<SunDiscShape>>,
     point_light_shadow_map: Res<PointLightShadowMap>,
     directional_light_shadow_map: Res<DirectionalLightShadowMap>,
     mut shadow_render_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
@@ -1837,6 +1854,10 @@ pub fn prepare_lights(
             num_directional_cascades_enabled_for_this_view += num_cascades;
         }
 
+        let sun_disc_shape_uniform = sun_disc_shape
+            .as_deref()
+            .map(|d| Vec4::new(d.edge_softness, d.limb_darkening, 0.0, 0.0))
+            .unwrap_or_default();
         let mut ambient_light_flags = AmbientLightFlags::NONE;
 
         if ambient_light.affects_lightmapped_meshes {
@@ -1847,6 +1868,7 @@ pub fn prepare_lights(
             directional_lights: gpu_directional_lights,
             ambient_color: Vec4::from_slice(&LinearRgba::from(ambient_light.color).to_f32_array())
                 * ambient_light.brightness,
+            sun_disc_shape: sun_disc_shape_uniform,
             cluster_factors: Vec4::new(
                 clusters.dimensions.x as f32 / extracted_view.viewport.z as f32,
                 clusters.dimensions.y as f32 / extracted_view.viewport.w as f32,
