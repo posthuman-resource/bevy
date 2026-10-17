@@ -8,7 +8,7 @@ use bevy_camera::visibility::{
     CascadesVisibleEntities, CubemapVisibleEntities, RenderLayers, ViewVisibility,
     VisibleMeshEntities,
 };
-use bevy_camera::{Camera, Camera3d, RenderTarget, ShadowLodOrigin};
+use bevy_camera::{Camera, Camera3d, MainPassResolutionOverride, RenderTarget, ShadowLodOrigin};
 use bevy_color::ColorToComponents;
 use bevy_core_pipeline::schedule::RootNonCameraView;
 use bevy_derive::{Deref, DerefMut};
@@ -1063,6 +1063,7 @@ pub fn prepare_lights(
             Option<&RenderLayers>,
             Has<NoIndirectDrawing>,
             Option<&AmbientLight>,
+            Option<&MainPassResolutionOverride>,
         ),
         With<Camera3d>,
     >,
@@ -1447,6 +1448,7 @@ pub fn prepare_lights(
         maybe_layers,
         _no_indirect_drawing,
         _maybe_ambient_override,
+        _resolution_override,
     ) in sorted_cameras
         .0
         .iter()
@@ -1724,6 +1726,7 @@ pub fn prepare_lights(
         maybe_layers,
         no_indirect_drawing,
         maybe_ambient_override,
+        resolution_override,
     ) in sorted_cameras
         .0
         .iter()
@@ -1843,13 +1846,18 @@ pub fn prepare_lights(
             ambient_light_flags |= AmbientLightFlags::AFFECTS_LIGHTMAPPED_MESHES;
         }
 
+        // Fragments find their cluster from their position in the main pass, which a
+        // `MainPassResolutionOverride` makes smaller than the viewport the clusters were made for.
+        let main_pass_size = resolution_override
+            .map_or(extracted_view.viewport.zw(), |size| **size)
+            .as_vec2();
         let mut gpu_lights = GpuLights {
             directional_lights: gpu_directional_lights,
             ambient_color: Vec4::from_slice(&LinearRgba::from(ambient_light.color).to_f32_array())
                 * ambient_light.brightness,
             cluster_factors: Vec4::new(
-                clusters.dimensions.x as f32 / extracted_view.viewport.z as f32,
-                clusters.dimensions.y as f32 / extracted_view.viewport.w as f32,
+                clusters.dimensions.x as f32 / main_pass_size.x,
+                clusters.dimensions.y as f32 / main_pass_size.y,
                 cluster_factors_zw.x,
                 cluster_factors_zw.y,
             ),

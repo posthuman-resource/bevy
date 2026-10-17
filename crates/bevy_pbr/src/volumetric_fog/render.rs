@@ -3,7 +3,7 @@
 use core::array;
 
 use bevy_asset::{load_embedded_asset, AssetId, AssetServer, Handle};
-use bevy_camera::Camera3d;
+use bevy_camera::{Camera3d, MainPassResolutionOverride, Viewport};
 use bevy_color::ColorToComponents as _;
 use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
@@ -18,6 +18,7 @@ use bevy_light::{FogVolume, VolumetricFog, VolumetricLight};
 use bevy_math::{vec4, Affine3A, Mat4, Vec3, Vec3A, Vec4};
 use bevy_mesh::{Mesh, MeshVertexBufferLayoutRef};
 use bevy_render::{
+    camera::ExtractedCamera,
     diagnostic::RecordDiagnostics,
     mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
     render_asset::RenderAssets,
@@ -288,6 +289,8 @@ pub fn volumetric_fog(
         &ViewVolumetricFog,
         &MeshViewBindGroup,
         &Msaa,
+        &ExtractedCamera,
+        Option<&MainPassResolutionOverride>,
     )>,
     pipeline_cache: Res<PipelineCache>,
     volumetric_lighting_pipeline: Res<VolumetricFogPipeline>,
@@ -305,6 +308,8 @@ pub fn volumetric_fog(
         view_fog_volumes,
         view_bind_group,
         msaa,
+        camera,
+        resolution_override,
     ) = view.into_inner();
 
     // Fetch the uniform buffer and binding.
@@ -425,6 +430,20 @@ pub fn volumetric_fog(
 
         render_pass.set_vertex_buffer(0, *vertex_buffer_slice.buffer.slice(..));
         render_pass.set_pipeline(pipeline);
+
+        // The fog is drawn over the main pass's image and reads its depth, so it covers the main pass's viewport.
+        if let Some(viewport) =
+            Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+        {
+            render_pass.set_viewport(
+                viewport.physical_position.x as f32,
+                viewport.physical_position.y as f32,
+                viewport.physical_size.x as f32,
+                viewport.physical_size.y as f32,
+                viewport.depth.start,
+                viewport.depth.end,
+            );
+        }
 
         render_pass.set_bind_group(0, &view_bind_group.main, &view_bind_group.main_offsets);
         render_pass.set_bind_group(

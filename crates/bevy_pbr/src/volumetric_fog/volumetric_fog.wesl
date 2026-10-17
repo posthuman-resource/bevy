@@ -39,10 +39,10 @@ import package::render::shadows::{get_cascade_index, world_to_directional_light_
 import package::render::utils::interleaved_gradient_noise;
 import package::render::view_transformations::{
     depth_ndc_to_view_z,
-    frag_coord_to_ndc,
     position_ndc_to_view,
     position_ndc_to_world,
-    position_view_to_world
+    position_view_to_world,
+    uv_to_ndc
 };
 import bevy_render::maths::orthonormalize;
 import package::render::clustered_forward as clustering;
@@ -109,6 +109,13 @@ fn henyey_greenstein(neg_LdotV: f32) -> f32 {
     return FRAC_4_PI * (1.0 - g * g) / (denom * sqrt(denom));
 }
 
+/// Like `frag_coord_to_ndc`, but over the main pass's viewport: the fog is drawn there, which a
+/// `MainPassResolutionOverride` makes smaller than `view.viewport`.
+fn main_pass_frag_coord_to_ndc(frag_coord: vec4<f32>) -> vec3<f32> {
+    let uv = (frag_coord.xy - view.main_pass_viewport.xy) / view.main_pass_viewport.zw;
+    return vec3(uv_to_ndc(uv), frag_coord.z);
+}
+
 @fragment
 fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // Unpack the `volumetric_fog` settings.
@@ -135,11 +142,11 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let frag_coord = position;
     let ndc_end_depth_from_buffer = textureLoad(depth_texture, vec2<i32>(frag_coord.xy), 0);
     let view_end_depth_from_buffer = -position_ndc_to_view(
-        frag_coord_to_ndc(vec4(position.xy, ndc_end_depth_from_buffer, 1.0))).z;
+        main_pass_frag_coord_to_ndc(vec4(position.xy, ndc_end_depth_from_buffer, 1.0))).z;
 
     // Calculate the start position of the ray. Since we're only rendering front
     // faces of the AABB, this is the current fragment's depth.
-    let view_start_pos = position_ndc_to_view(frag_coord_to_ndc(frag_coord));
+    let view_start_pos = position_ndc_to_view(main_pass_frag_coord_to_ndc(frag_coord));
 
     // Calculate the end position of the ray. This requires us to raytrace the
     // back faces of the AABB to find the one that our ray intersects.
@@ -193,7 +200,7 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
     // Calculate the ray origin (`Ro`) and the ray direction (`Rd`) in NDC,
     // view, and world coordinates.
-    let Rd_ndc = vec3(frag_coord_to_ndc(position).xy, 1.0);
+    let Rd_ndc = vec3(main_pass_frag_coord_to_ndc(position).xy, 1.0);
     let Rd_view = normalize(position_ndc_to_view(Rd_ndc));
     var Ro_world = position_view_to_world(view_start_pos.xyz);
     let Rd_world = normalize(position_ndc_to_world(Rd_ndc) - view.world_position);
