@@ -25,6 +25,7 @@
 //! created by composing multiple [`RenderCommand`]s.
 
 mod draw;
+mod draw_spans;
 mod draw_state;
 mod rangefinder;
 
@@ -35,6 +36,7 @@ use bevy_platform::collections::{hash_map::Entry, HashMap};
 use bevy_utils::default;
 use bytemuck::{Pod, Zeroable};
 pub use draw::*;
+pub use draw_spans::PhaseDrawSpans;
 pub use draw_state::*;
 use encase::ShaderType;
 use encase::{internal::WriteInto, ShaderSize};
@@ -1180,11 +1182,13 @@ where
             // locks.
         }
 
-        self.render_batchable_meshes(render_pass, world, view)?;
-        self.render_unbatchable_meshes(render_pass, world, view)?;
-        self.render_non_meshes(render_pass, world, view)?;
-
-        Ok(())
+        let mut spans = draw_spans::DrawSpans::<BPI>::new(world);
+        let rendered = self
+            .render_batchable_meshes(render_pass, world, view, &mut spans)
+            .and_then(|()| self.render_unbatchable_meshes(render_pass, world, view, &mut spans))
+            .and_then(|()| self.render_non_meshes(render_pass, world, view, &mut spans));
+        draw_spans::end(&mut spans, render_pass);
+        rendered
     }
 
     /// Renders all batchable meshes queued in this phase.
@@ -1193,6 +1197,7 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        spans: &mut Option<draw_spans::DrawSpans<'w, BPI>>,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
@@ -1228,6 +1233,7 @@ where
                             continue;
                         };
 
+                        draw_spans::before(spans, render_pass, &binned_phase_item);
                         draw_function.draw(world, render_pass, view, &binned_phase_item)?;
                     }
                 }
@@ -1252,6 +1258,7 @@ where
                         continue;
                     };
 
+                    draw_spans::before(spans, render_pass, &binned_phase_item);
                     draw_function.draw(world, render_pass, view, &binned_phase_item)?;
                 }
             }
@@ -1301,6 +1308,7 @@ where
                         continue;
                     };
 
+                    draw_spans::before(spans, render_pass, &binned_phase_item);
                     draw_function.draw(world, render_pass, view, &binned_phase_item)?;
                 }
             }
@@ -1315,6 +1323,7 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        spans: &mut Option<draw_spans::DrawSpans<'w, BPI>>,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
@@ -1367,6 +1376,7 @@ where
                     continue;
                 };
 
+                draw_spans::before(spans, render_pass, &binned_phase_item);
                 draw_function.draw(world, render_pass, view, &binned_phase_item)?;
             }
         }
@@ -1381,6 +1391,7 @@ where
         render_pass: &mut TrackedRenderPass<'w>,
         world: &'w World,
         view: Entity,
+        spans: &mut Option<draw_spans::DrawSpans<'w, BPI>>,
     ) -> Result<(), DrawError> {
         let draw_functions = world.resource::<DrawFunctions<BPI>>();
         let mut draw_functions = draw_functions.write();
@@ -1402,6 +1413,7 @@ where
                     continue;
                 };
 
+                draw_spans::before(spans, render_pass, &binned_phase_item);
                 draw_function.draw(world, render_pass, view, &binned_phase_item)?;
             }
         }
@@ -1993,6 +2005,8 @@ where
         let mut draw_functions = draw_functions.write();
         draw_functions.prepare(world);
 
+        let mut spans = draw_spans::DrawSpans::<I>::new(world);
+        let mut rendered = Ok(());
         let mut index = 0;
         while index < items.len() {
             let item = &items[index];
@@ -2001,11 +2015,16 @@ where
                 index += 1;
             } else {
                 let draw_function = draw_functions.get_mut(item.draw_function()).unwrap();
-                draw_function.draw(world, render_pass, view, item)?;
+                draw_spans::before(&mut spans, render_pass, item);
+                rendered = draw_function.draw(world, render_pass, view, item);
+                if rendered.is_err() {
+                    break;
+                }
                 index += batch_range.len();
             }
         }
-        Ok(())
+        draw_spans::end(&mut spans, render_pass);
+        rendered
     }
 }
 

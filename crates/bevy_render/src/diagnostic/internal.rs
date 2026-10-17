@@ -211,7 +211,13 @@ struct SpanRecord {
     end_timestamp_index: Option<u32>,
     begin_instant: Option<Instant>,
     end_instant: Option<Instant>,
-    pipeline_statistics_index: Option<u32>,
+    /// The pipeline statistics queries whose sum is this span's statistics: its own pieces
+    /// (split around nested pass spans) and those of the pass spans nested in it.
+    pipeline_statistics: Vec<u32>,
+    /// Whether the last of `pipeline_statistics` is the query active now.
+    pipeline_statistics_open: bool,
+    /// False when a query this span needed could not be written (the frame ran out of queries).
+    pipeline_statistics_complete: bool,
 }
 
 struct FrameData {
@@ -392,7 +398,9 @@ impl FrameData {
             end_timestamp_index: None,
             begin_instant: None,
             end_instant: None,
-            pipeline_statistics_index: None,
+            pipeline_statistics: Vec::new(),
+            pipeline_statistics_open: false,
+            pipeline_statistics_complete: true,
         });
 
         self.open_spans.last_mut().unwrap()
@@ -407,7 +415,9 @@ impl FrameData {
             .rfind(|(_, v)| v.thread_id == thread_id)
             .unwrap();
 
-        let span = self.open_spans.swap_remove(index);
+        // `remove`, not `swap_remove`: open spans stay in the order they were opened, so another
+        // thread closing a span never makes a nested span look like its parent's ancestor.
+        let span = self.open_spans.remove(index);
         self.closed_spans.push(span);
         self.closed_spans.last_mut().unwrap()
     }
@@ -456,16 +466,41 @@ impl FrameData {
         span.end_instant = Some(Instant::now());
     }
 
+    /// The innermost open pass span of this thread, which a pass span opened now is nested in.
+    fn enclosing_pass_span(&self) -> Option<usize> {
+        let thread_id = thread::current().id();
+        self.open_spans
+            .iter()
+            .rposition(|v| v.thread_id == thread_id && v.pass_kind.is_some())
+    }
+
     fn begin_pass<P: Pass>(&mut self, pass: &mut P, name: Cow<'static, str>) {
         let begin_instant = Instant::now();
 
         let begin_timestamp_index = self.write_timestamp(pass, true);
+
+        // Pipeline statistics queries cannot nest. A pass span opened inside another one (on the
+        // same pass) suspends the enclosing span's query; it resumes in a new query when this span
+        // ends, and the enclosing span adds this span's statistics to its own.
+        let suspended = self
+            .enclosing_pass_span()
+            .filter(|&parent| self.open_spans[parent].pipeline_statistics_open);
+        if let Some(parent) = suspended {
+            pass.end_pipeline_statistics_query();
+            self.open_spans[parent].pipeline_statistics_open = false;
+        }
         let pipeline_statistics_index = self.write_pipeline_statistics(pass);
+        if let Some(parent) = suspended
+            && pipeline_statistics_index.is_none()
+        {
+            self.open_spans[parent].pipeline_statistics_complete = false;
+        }
 
         let span = self.open_span(Some(P::KIND), name);
         span.begin_instant = Some(begin_instant);
         span.begin_timestamp_index = begin_timestamp_index;
-        span.pipeline_statistics_index = pipeline_statistics_index;
+        span.pipeline_statistics.extend(pipeline_statistics_index);
+        span.pipeline_statistics_open = pipeline_statistics_index.is_some();
     }
 
     fn end_pass(&mut self, pass: &mut impl Pass) {
@@ -474,9 +509,22 @@ impl FrameData {
         let span = self.close_span();
         span.end_timestamp_index = end_timestamp_index;
 
-        if span.pipeline_statistics_index.is_some() {
+        if core::mem::take(&mut span.pipeline_statistics_open) {
             pass.end_pipeline_statistics_query();
         }
+        let nested = span.pipeline_statistics.clone();
+        let nested_complete = span.pipeline_statistics_complete;
+        if let Some(parent) = self.enclosing_pass_span()
+            && !self.open_spans[parent].pipeline_statistics.is_empty()
+        {
+            let resumed = self.write_pipeline_statistics(pass);
+            let parent = &mut self.open_spans[parent];
+            parent.pipeline_statistics.extend(nested);
+            parent.pipeline_statistics.extend(resumed);
+            parent.pipeline_statistics_open = resumed.is_some();
+            parent.pipeline_statistics_complete &= nested_complete && resumed.is_some();
+        }
+        let span = self.closed_spans.last_mut().expect("the span just closed");
 
         span.end_instant = Some(Instant::now());
     }
@@ -593,7 +641,7 @@ impl FrameData {
 
         let start = self.pipeline_statistics_buffer_offset as usize;
         let len = (self.num_pipeline_statistics as usize) * 40;
-        let pipeline_statistics = data[start..start + len]
+        let all_statistics = data[start..start + len]
             .as_chunks()
             .0
             .iter()
@@ -639,32 +687,41 @@ impl FrameData {
                 });
             }
 
-            if let Some(index) = span.pipeline_statistics_index {
-                let index = (index as usize) * 5;
-
+            if !span.pipeline_statistics.is_empty() && span.pipeline_statistics_complete {
+                // The span's statistics: the sum of its queries, five counters each.
+                let mut pipeline_statistics = [0u64; 5];
+                for &query in &span.pipeline_statistics {
+                    let at = (query as usize) * 5;
+                    for (total, value) in pipeline_statistics
+                        .iter_mut()
+                        .zip(&all_statistics[at..at + 5])
+                    {
+                        *total += value;
+                    }
+                }
                 if span.pass_kind == Some(PassKind::Render) {
                     diagnostics.push(RenderDiagnostic {
                         path: self.diagnostic_path(&span.path_range, "vertex_shader_invocations"),
                         suffix: "",
-                        value: pipeline_statistics[index] as f64,
+                        value: pipeline_statistics[0] as f64,
                     });
 
                     diagnostics.push(RenderDiagnostic {
                         path: self.diagnostic_path(&span.path_range, "clipper_invocations"),
                         suffix: "",
-                        value: pipeline_statistics[index + 1] as f64,
+                        value: pipeline_statistics[1] as f64,
                     });
 
                     diagnostics.push(RenderDiagnostic {
                         path: self.diagnostic_path(&span.path_range, "clipper_primitives_out"),
                         suffix: "",
-                        value: pipeline_statistics[index + 2] as f64,
+                        value: pipeline_statistics[2] as f64,
                     });
 
                     diagnostics.push(RenderDiagnostic {
                         path: self.diagnostic_path(&span.path_range, "fragment_shader_invocations"),
                         suffix: "",
-                        value: pipeline_statistics[index + 3] as f64,
+                        value: pipeline_statistics[3] as f64,
                     });
                 }
 
@@ -672,7 +729,7 @@ impl FrameData {
                     diagnostics.push(RenderDiagnostic {
                         path: self.diagnostic_path(&span.path_range, "compute_shader_invocations"),
                         suffix: "",
-                        value: pipeline_statistics[index + 4] as f64,
+                        value: pipeline_statistics[4] as f64,
                     });
                 }
             }

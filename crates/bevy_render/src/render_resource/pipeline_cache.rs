@@ -327,6 +327,33 @@ impl PipelineCache {
         }
     }
 
+    /// A readable name for a render pipeline, for diagnostics: the asset path of its fragment
+    /// shader with `/` written as `:` (`bevy_pbr:render:pbr.wgsl`), of its vertex (or mesh) shader
+    /// when it has no fragment stage, else its label, else `pipeline <index>`. Pipelines that share
+    /// a shader share a name.
+    pub fn render_pipeline_name(&self, id: CachedRenderPipelineId) -> Cow<'static, str> {
+        let (label, fragment, vertex) = match self.pipelines.get(id.id()).map(|p| &p.descriptor) {
+            Some(PipelineDescriptor::RenderPipelineDescriptor(d)) => (
+                d.label.as_ref(),
+                d.fragment.as_ref().map(|f| &f.shader),
+                Some(&d.vertex.shader),
+            ),
+            Some(PipelineDescriptor::MeshPipelineDescriptor(d)) => (
+                d.label.as_ref(),
+                d.fragment.as_ref().map(|f| &f.shader),
+                Some(&d.mesh.shader),
+            ),
+            _ => (None, None, None),
+        };
+        let shader = fragment
+            .or(vertex)
+            .and_then(Handle::path)
+            .map(|path| Cow::Owned(path.path().to_string_lossy().replace(['/', '\\'], ":")));
+        shader
+            .or_else(|| label.map(|l| Cow::Owned(l.replace('/', ":"))))
+            .unwrap_or_else(|| Cow::Owned(format!("pipeline {}", id.id())))
+    }
+
     /// Get the compute pipeline descriptor a cached render pipeline was inserted from.
     ///
     /// See [`PipelineCache::queue_compute_pipeline()`].
