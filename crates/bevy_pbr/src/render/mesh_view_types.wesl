@@ -50,6 +50,8 @@ const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32                  = 1u << 
 const DIRECTIONAL_LIGHT_FLAGS_VOLUMETRIC_BIT: u32                       = 1u << 1u;
 const DIRECTIONAL_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32 = 1u << 2u;
 const DIRECTIONAL_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32           = 1u << 3u;
+const DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_RECEIVE_BIT: u32               = 1u << 4u;
+const DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_CASTERS_BIT: u32               = 1u << 5u;
 
 struct RectLight {
     color: vec4<f32>,

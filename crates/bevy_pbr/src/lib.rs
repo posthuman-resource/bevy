@@ -49,6 +49,7 @@ mod parallax;
 mod pbr_material;
 mod prepass;
 mod render;
+pub mod shadow_mask;
 mod ssao;
 mod ssr;
 mod transmission;
@@ -74,6 +75,10 @@ pub use parallax::*;
 pub use pbr_material::*;
 pub use prepass::*;
 pub use render::*;
+pub use shadow_mask::{
+    DirectionalLightShadowMask, DirectionalShadowMask, DirectionalShadowMaskPlugin,
+    ViewDirectionalShadowMask,
+};
 pub use ssao::*;
 pub use ssr::*;
 pub use transmission::*;
@@ -235,6 +240,7 @@ impl Plugin for PbrPlugin {
             ))
             .add_plugins((
                 decal::ForwardDecalPlugin,
+                DirectionalShadowMaskPlugin,
                 SyncComponentPlugin::<DirectionalLight, Self>::default(),
                 SyncComponentPlugin::<PointLight, Self>::default(),
                 SyncComponentPlugin::<SpotLight, Self>::default(),

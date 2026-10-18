@@ -54,6 +54,7 @@ use crate::{
     },
     prepass,
     resources::{AtmosphereBuffer, AtmosphereSampler, AtmosphereTextures, GpuAtmosphere},
+    shadow_mask::{DirectionalShadowMask, ViewDirectionalShadowMask},
     Bluenoise, ExtractedAtmosphere, FogMeta, GlobalClusterableObjectMeta, GpuClusteredLights,
     GpuFog, GpuLights, LightMeta, LightProbesBuffer, LightProbesUniform, MeshPipeline,
     MeshPipelineKey, RenderViewLightProbes, ScreenSpaceAmbientOcclusionResources,
@@ -100,6 +101,7 @@ bitflags::bitflags! {
         const DISTANCE_FOG                     = 1 << 14;
         const AREA_LIGHT_LUTS                  = 1 << 15;
         const VIEW_TRANSMISSION_TEXTURE        = 1 << 16;
+        const DIRECTIONAL_SHADOW_MASK          = 1 << 17;
     }
 }
 
@@ -182,6 +184,9 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         }
         if value.contains(MeshPipelineKey::VIEW_TRANSMISSION_TEXTURE) {
             result |= MeshPipelineViewLayoutKey::VIEW_TRANSMISSION_TEXTURE;
+        }
+        if value.contains(MeshPipelineKey::DIRECTIONAL_SHADOW_MASK) {
+            result |= MeshPipelineViewLayoutKey::DIRECTIONAL_SHADOW_MASK;
         }
 
         result
@@ -492,6 +497,13 @@ fn layout_entries(
             (38, sampler(SamplerBindingType::Filtering)),
         ));
     }
+    // Directional shadow mask
+    if layout_key.contains(MeshPipelineViewLayoutKey::DIRECTIONAL_SHADOW_MASK) {
+        entries = entries.extend_with_indices(((
+            39,
+            texture_2d(TextureSampleType::Float { filterable: false }),
+        ),));
+    }
 
     let mut binding_array_entries = DynamicBindGroupLayoutEntries::new(ShaderStages::FRAGMENT);
     if layout_key.contains(MeshPipelineViewLayoutKey::ENVIRONMENT_MAP) {
@@ -671,6 +683,10 @@ pub fn prepare_mesh_view_bind_groups(
             Option<&OrderIndependentTransparencySettingsOffset>,
             Has<ScreenSpaceTransmission>,
         ),
+        (
+            Has<DirectionalShadowMask>,
+            Option<&ViewDirectionalShadowMask>,
+        ),
     )>,
     (images, fallback_image, fallback_image_zero): (
         Res<RenderAssets<GpuImage>>,
@@ -741,6 +757,7 @@ pub fn prepare_mesh_view_bind_groups(
                 view_oit_settings_offset,
                 has_transmission,
             ),
+            (has_shadow_mask, shadow_mask),
         ) in &views
         {
             let mut entries = DynamicBindGroupEntries::new();
@@ -864,6 +881,14 @@ pub fn prepare_mesh_view_bind_groups(
                     .screen_space_ambient_occlusion_texture
                     .default_view;
                 entries = entries.extend_with_indices(((17, ssao_view),));
+            }
+
+            if has_shadow_mask {
+                layout_key |= MeshPipelineViewLayoutKey::DIRECTIONAL_SHADOW_MASK;
+                let mask_view = shadow_mask
+                    .map(|mask| &mask.0)
+                    .unwrap_or(&fallback_image.d2.texture_view);
+                entries = entries.extend_with_indices(((39, mask_view),));
             }
 
             if has_transmission {

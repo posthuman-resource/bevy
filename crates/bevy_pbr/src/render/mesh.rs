@@ -1,4 +1,5 @@
 use crate::contact_shadows::ContactShadows;
+use crate::shadow_mask::DirectionalShadowMask;
 use crate::{resources::prepare_atmosphere_buffers, skin::skin_uniforms_from_world};
 use alloc::sync::Arc;
 use bevy_asset::uuid::Uuid;
@@ -388,6 +389,7 @@ pub fn check_views_need_specialization(
             Has<ScreenSpaceReflectionsUniform>,
             Has<ContactShadows>,
         ),
+        Option<&DirectionalShadowMask>,
     )>,
     mut seen_views: Local<HashSet<RetainedViewEntity>>,
 ) {
@@ -407,6 +409,7 @@ pub fn check_views_need_specialization(
         distance_fog,
         (has_environment_maps, has_irradiance_volumes),
         (has_oit, has_atmosphere, has_ssr, has_contact_shadows),
+        shadow_mask,
     ) in views.iter_mut()
     {
         seen_views.insert(view.retained_view_entity);
@@ -456,6 +459,13 @@ pub fn check_views_need_specialization(
 
         if has_contact_shadows {
             view_key |= MeshPipelineKey::CONTACT_SHADOWS;
+        }
+
+        if let Some(shadow_mask) = shadow_mask {
+            view_key |= MeshPipelineKey::DIRECTIONAL_SHADOW_MASK;
+            if shadow_mask.debug_view {
+                view_key |= MeshPipelineKey::DIRECTIONAL_SHADOW_MASK_DEBUG;
+            }
         }
 
         if view.invert_culling {
@@ -3128,7 +3138,9 @@ bitflags::bitflags! {
         const INVERT_CULLING                    = 1 << 22;
         const PREPASS_READS_MATERIAL            = 1 << 23;
         const CONTACT_SHADOWS                   = 1 << 24;
-        const LAST_FLAG                         = Self::CONTACT_SHADOWS.bits();
+        const DIRECTIONAL_SHADOW_MASK           = 1 << 25;
+        const DIRECTIONAL_SHADOW_MASK_DEBUG     = 1 << 26;
+        const LAST_FLAG                         = Self::DIRECTIONAL_SHADOW_MASK_DEBUG.bits();
 
         const ALL_PREPASS_BITS                  = Self::DEPTH_PREPASS.bits()
                                                 | Self::NORMAL_PREPASS.bits()
@@ -3586,6 +3598,14 @@ impl SpecializedMeshPipeline for MeshPipeline {
         // Transparent meshes don't contribute to the depth prepass, so SSAO should not be applied.
         if key.contains(MeshPipelineKey::SCREEN_SPACE_AMBIENT_OCCLUSION) && depth_write_enabled {
             shader_defs.push("SCREEN_SPACE_AMBIENT_OCCLUSION".into());
+        }
+
+        // The shadow mask is made from the depth prepass, which transparent meshes are not in.
+        if key.contains(MeshPipelineKey::DIRECTIONAL_SHADOW_MASK) && depth_write_enabled {
+            shader_defs.push("DIRECTIONAL_SHADOW_MASK".into());
+            if key.contains(MeshPipelineKey::DIRECTIONAL_SHADOW_MASK_DEBUG) {
+                shader_defs.push("DIRECTIONAL_SHADOW_MASK_DEBUG".into());
+            }
         }
 
         if key.contains(MeshPipelineKey::MOTION_VECTOR_PREPASS) {

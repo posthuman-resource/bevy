@@ -582,10 +582,24 @@ fn apply_pbr_lighting(
 
     // directional lights (direct)
     let n_directional_lights = view_bindings::lights.n_directional_lights;
+    @if(DIRECTIONAL_SHADOW_MASK)
+    var directional_shadow_mask: f32 = 1.0;
+    @if(DIRECTIONAL_SHADOW_MASK)
+    if (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u {
+        directional_shadow_mask = shadows::fetch_directional_shadow_mask(in.world_position, in.world_normal, view_z, in.frag_coord.xy);
+    }
+    // The term the mask's light takes here; magenta where no light takes the mask.
+    @if(DIRECTIONAL_SHADOW_MASK_DEBUG)
+    var directional_shadow_mask_debug = vec3<f32>(1.0, 0.0, 1.0);
     for (var i: u32 = 0u; i < n_directional_lights; i = i + 1u) {
         // check if this light should be skipped, which occurs if this light does not intersect with the view
         // note point and spot lights aren't skippable, as the relevant lights are filtered in `assign_lights_to_clusters`
         let light = &view_bindings::lights.directional_lights[i];
+
+        // A light that holds casters for the shadow mask adds no light of its own.
+        if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_CASTERS_BIT) != 0u {
+            continue;
+        }
 
         // If we're lightmapped, disable diffuse contribution from the light if
         // requested, to avoid double-counting light.
@@ -600,8 +614,21 @@ fn apply_pbr_lighting(
         var shadow: f32 = 1.0;
         if ((in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
                 && (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
-            shadow = shadows::fetch_directional_shadow(i, in.world_position, in.world_normal, view_z, in.frag_coord.xy);
+            var takes_mask = false;
+            @if(DIRECTIONAL_SHADOW_MASK)
+            takes_mask = ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_RECEIVE_BIT) != 0u;
+            if takes_mask {
+                @if(DIRECTIONAL_SHADOW_MASK)
+                shadow = directional_shadow_mask;
+            } else {
+                shadow = shadows::fetch_directional_shadow(i, in.world_position, in.world_normal, view_z, in.frag_coord.xy);
+            }
             shadow *= in.directional_shadow_factor;
+        }
+
+        @if(DIRECTIONAL_SHADOW_MASK_DEBUG)
+        if ((*light).flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_RECEIVE_BIT) != 0u {
+            directional_shadow_mask_debug = vec3<f32>(shadow);
         }
 
         @if(CONTACT_SHADOWS && DEPTH_PREPASS)
@@ -858,6 +885,9 @@ fn apply_pbr_lighting(
         clusterable_object_index_ranges,
         cluster_index,
     );
+
+    @if(DIRECTIONAL_SHADOW_MASK_DEBUG)
+    output_color = vec4<f32>(directional_shadow_mask_debug, output_color.a);
 
     return output_color;
 }

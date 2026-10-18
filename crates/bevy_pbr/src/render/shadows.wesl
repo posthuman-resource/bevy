@@ -1,5 +1,8 @@
 import package::render::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{
+        POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE, DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_CASTERS_BIT,
+    },
     mesh_view_bindings as view_bindings,
     shadow_sampling::{
         SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_cubemap_pcss,
@@ -255,6 +258,26 @@ fn fetch_directional_shadow(
                 frag_coord_xy,
             );
             shadow = mix(shadow, next_shadow, (-view_z - next_near_bound) / (this_far_bound - next_near_bound));
+        }
+    }
+    return shadow;
+}
+
+// The shadow that a light receiving the view's directional shadow mask takes on an opaque surface: the mask, folded
+// by minimum with the shadow maps of every light that holds the casters the mask does not see.
+@if(DIRECTIONAL_SHADOW_MASK)
+fn fetch_directional_shadow_mask(
+    frag_position: vec4<f32>,
+    surface_normal: vec3<f32>,
+    view_z: f32,
+    frag_coord_xy: vec2<f32>,
+) -> f32 {
+    var shadow = textureLoad(view_bindings::directional_shadow_mask, vec2<i32>(frag_coord_xy), 0).r;
+    for (var i: u32 = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
+        let flags = view_bindings::lights.directional_lights[i].flags;
+        if ((flags & DIRECTIONAL_LIGHT_FLAGS_SHADOW_MASK_CASTERS_BIT) != 0u
+                && (flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u && shadow > 0.0) {
+            shadow = min(shadow, fetch_directional_shadow(i, frag_position, surface_normal, view_z, frag_coord_xy));
         }
     }
     return shadow;

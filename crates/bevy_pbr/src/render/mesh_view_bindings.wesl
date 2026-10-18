@@ -112,6 +112,9 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(0) @binding(38) var dfg_lut_sampler: sampler;
 }
 
+@if(DIRECTIONAL_SHADOW_MASK)
+@group(0) @binding(39) var directional_shadow_mask: texture_2d<f32>;
+
 @if(ENVIRONMENT_MAP && MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
 @group(1) @binding(0) var diffuse_environment_maps: binding_array<texture_cube<f32>, 8u>;
 @group(1) @binding(1) var specular_environment_maps: binding_array<texture_cube<f32>, 8u>;

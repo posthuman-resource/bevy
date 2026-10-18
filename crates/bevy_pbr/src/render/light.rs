@@ -116,6 +116,8 @@ pub struct ExtractedDirectionalLight {
     pub shadow_maps_enabled: bool,
     pub contact_shadows_enabled: bool,
     pub volumetric: bool,
+    /// How this light uses the views' directional shadow masks, if at all.
+    pub shadow_mask: Option<DirectionalLightShadowMask>,
     /// whether this directional light contributes diffuse light to lightmapped
     /// meshes
     pub affects_lightmapped_mesh_diffuse: bool,
@@ -179,6 +181,8 @@ bitflags::bitflags! {
         const VOLUMETRIC                        = 1 << 1;
         const AFFECTS_LIGHTMAPPED_MESH_DIFFUSE  = 1 << 2;
         const CONTACT_SHADOWS_ENABLED           = 1 << 3;
+        const SHADOW_MASK_RECEIVE               = 1 << 4;
+        const SHADOW_MASK_CASTERS               = 1 << 5;
         const NONE                              = 0;
         const UNINITIALIZED                     = 0xFFFF;
     }
@@ -398,11 +402,13 @@ pub fn extract_lights(
                 Option<&VolumetricLight>,
                 Has<OcclusionCulling>,
                 Option<&SunDisk>,
+                Option<&DirectionalLightShadowMask>,
             ),
             (
                 Without<SpotLight>,
                 Or<(
                     Changed<DirectionalLight>,
+                    Changed<DirectionalLightShadowMask>,
                     Changed<CascadesVisibleEntities>,
                     Changed<Cascades>,
                     Changed<CascadeShadowConfig>,
@@ -752,6 +758,7 @@ pub fn extract_lights(
         volumetric_light,
         occlusion_culling,
         sun_disk,
+        shadow_mask,
     ) in &directional_lights
     {
         if !view_visibility.get() {
@@ -868,6 +875,7 @@ pub fn extract_lights(
             illuminance: directional_light.illuminance,
             transform: *transform,
             volumetric: volumetric_light.is_some(),
+            shadow_mask: shadow_mask.copied(),
             affects_lightmapped_mesh_diffuse: directional_light.affects_lightmapped_mesh_diffuse,
             #[cfg(feature = "experimental_pbr_pcss")]
             soft_shadow_size: directional_light.soft_shadow_size,
@@ -1808,6 +1816,16 @@ pub fn prepare_lights(
 
             if light.contact_shadows_enabled {
                 flags |= DirectionalLightFlags::CONTACT_SHADOWS_ENABLED;
+            }
+
+            match light.shadow_mask {
+                Some(DirectionalLightShadowMask::Receive) => {
+                    flags |= DirectionalLightFlags::SHADOW_MASK_RECEIVE;
+                }
+                Some(DirectionalLightShadowMask::Casters) => {
+                    flags |= DirectionalLightFlags::SHADOW_MASK_CASTERS;
+                }
+                None => {}
             }
 
             if light.affects_lightmapped_mesh_diffuse {
